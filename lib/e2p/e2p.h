@@ -13,6 +13,8 @@
 
 #include <ext2fs/ext2_fs.h>
 
+#include "support/json-out.h"
+
 #define E2P_FEATURE_COMPAT	0
 #define E2P_FEATURE_INCOMPAT	1
 #define E2P_FEATURE_RO_INCOMPAT	2
@@ -42,8 +44,10 @@ int iterate_on_dir (const char * dir_name,
 void list_super(struct ext2_super_block * s);
 void list_super2(struct ext2_super_block * s, FILE *f);
 void print_fs_errors (FILE * f, unsigned short errors);
+void snprint_fs_errors (char *str, size_t size, unsigned short errors);
 void print_flags (FILE * f, unsigned long flags, unsigned options);
 void print_fs_state (FILE * f, unsigned short state);
+void snprint_fs_state (char *str, size_t size, unsigned short state);
 int setflags (int fd, unsigned long flags);
 int setversion (int fd, unsigned long version);
 
@@ -77,3 +81,5 @@ char *e2p_os2string(int os_type);
 int e2p_string2os(char *str);
 
 unsigned int e2p_percent(int percent, unsigned int base);
+
+void fill_json_super(struct json_obj *obj, struct ext2_super_block * s);

@@ -863,7 +863,10 @@ try_open_again:
 	} else {
 		if (grp_only)
 			goto just_descriptors;
-		list_super (fs->super);
+		if (json)
+			fill_json_super(dump_obj, fs->super);
+		else
+			list_super (fs->super);
 		if (ext2fs_has_feature_journal_dev(fs->super)) {
 			print_journal_information(fs);
 			if (json) {

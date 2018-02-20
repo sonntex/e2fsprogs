@@ -30,3 +30,13 @@ void print_fs_state (FILE * f, unsigned short state)
 	if (state & EXT2_ERROR_FS)
 		fprintf (f, " with errors");
 }
+
+void snprint_fs_state (char *str, size_t size, unsigned short state)
+{
+	if (state & EXT2_VALID_FS)
+		snprintf (str, size, "clean");
+	else
+		snprintf (str, size, "not clean");
+	if (state & EXT2_ERROR_FS)
+		snprintf (str, size, "with errors");
+}

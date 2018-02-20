@@ -38,3 +38,21 @@ void print_fs_errors (FILE * f, unsigned short errors)
 			fprintf (f, "Unknown (continue)");
 	}
 }
+
+void snprint_fs_errors (char *buf, size_t size, unsigned short errors)
+{
+	switch (errors)
+	{
+		case EXT2_ERRORS_CONTINUE:
+			snprintf (buf, size, "Continue");
+			break;
+		case EXT2_ERRORS_RO:
+			snprintf (buf, size, "Remount read-only");
+			break;
+		case EXT2_ERRORS_PANIC:
+			snprintf (buf, size, "Panic");
+			break;
+		default:
+			snprintf (buf, size, "Unknown");
+	}
+}
