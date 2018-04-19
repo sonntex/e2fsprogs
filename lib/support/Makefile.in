@@ -22,7 +22,8 @@ OBJS=		cstring.o \
 		quotaio.o \
 		quotaio_v2.o \
 		quotaio_tree.o \
-		dict.o
+		dict.o \
+		json-out.o
 
 SRCS=		$(srcdir)/argv_parse.c \
 		$(srcdir)/cstring.c \
@@ -35,7 +36,8 @@ SRCS=		$(srcdir)/argv_parse.c \
 		$(srcdir)/quotaio.c \
 		$(srcdir)/quotaio_tree.c \
 		$(srcdir)/quotaio_v2.c \
-		$(srcdir)/dict.c
+		$(srcdir)/dict.c \
+		$(srcdir)/json-out.c
 
 LIBRARY= libsupport
 LIBDIR= support
@@ -165,3 +167,4 @@ quotaio_v2.o: $(srcdir)/quotaio_v2.c $(top_builddir)/lib/config.h \
  $(srcdir)/dqblk_v2.h $(srcdir)/quotaio_tree.h
 dict.o: $(srcdir)/dict.c $(top_builddir)/lib/config.h \
  $(top_builddir)/lib/dirpaths.h $(srcdir)/dict.h
+json-out.o: $(srcdir)/json-out.c $(srcdir)/json-out.h

@@ -607,7 +607,12 @@ try_open_again:
 			goto just_descriptors;
 		list_super (fs->super);
 		if (ext2fs_has_feature_journal_dev(fs->super)) {
-			print_journal_information(fs);
+			print_journal_information(fs, dump_obj);
+			if (json) {
+				json_obj_print_json(dump_obj, 0);
+				putchar('\n');
+				json_obj_delete(dump_obj);
+			}
 			ext2fs_close_free(&fs);
 			exit(0);
 		}
@@ -616,6 +621,11 @@ try_open_again:
 			print_inline_journal_information(fs);
 		list_bad_blocks(fs, 0);
 		if (header_only) {
+			if (json) {
+				json_obj_print_json(dump_obj, 0);
+				putchar('\n');
+				json_obj_delete(dump_obj);
+			}
 			ext2fs_close_free(&fs);
 			exit (0);
 		}
@@ -635,6 +645,11 @@ just_descriptors:
 			       program_name, device_name,
 			       error_message(retval));
 		}
+	}
+	if (json) {
+		json_obj_print_json(dump_obj, 0);
+		putchar('\n');
+		json_obj_delete(dump_obj);
 	}
 	ext2fs_close_free(&fs);
 	remove_error_table(&et_ext2_error_table);
