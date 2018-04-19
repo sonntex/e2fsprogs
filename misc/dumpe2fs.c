@@ -42,6 +42,7 @@ extern int optind;
 
 #include "support/nls-enable.h"
 #include "support/plausible.h"
+#include "support/json-out.h"
 #include "../version.h"
 
 #define in_use(m, x)	(ext2fs_test_bit ((x), (m)))
@@ -53,7 +54,7 @@ static int blocks64 = 0;
 
 static void usage(void)
 {
-	fprintf(stderr, _("Usage: %s [-bfghixV] [-o superblock=<num>] "
+	fprintf(stderr, _("Usage: %s [-bfghixjV] [-o superblock=<num>] "
 		 "[-o blocksize=<num>] device\n"), program_name);
 	exit(1);
 }
@@ -69,6 +70,17 @@ static void print_number(unsigned long long num)
 		printf("%llu", num);
 }
 
+static void snprint_number(char *str, size_t size, unsigned long long num)
+{
+	if (hex_format) {
+		if (blocks64)
+			snprintf(str, size, "0x%08llx", num);
+		else
+			snprintf(str, size, "0x%04llx", num);
+	} else
+		snprintf(str, size, "%llu", num);
+}
+
 static void print_range(unsigned long long a, unsigned long long b)
 {
 	if (hex_format) {
@@ -78,6 +90,19 @@ static void print_range(unsigned long long a, unsigned long long b)
 			printf("0x%04llx-0x%04llx", a, b);
 	} else
 		printf("%llu-%llu", a, b);
+}
+
+static struct json_obj *json_create_range_obj(unsigned long long a,
+		       unsigned long long b)
+{
+	struct json_obj *obj = json_obj_create();
+	char buf[32];
+	const char *fmt = hex_format ? (blocks64 ? "0x%08llx" : "0x%04llx") : "%llu";
+
+	json_obj_add_fmt_buf_str(obj, "start", buf, sizeof(buf), fmt, a);
+	json_obj_add_fmt_buf_str(obj, "len", buf, sizeof(buf), fmt, b - a + 1);
+
+	return obj;
 }
 
 static void print_free(unsigned long group, char * bitmap,
@@ -103,6 +128,31 @@ static void print_free(unsigned long group, char * bitmap,
 				i = j;
 			}
 			p = 1;
+		}
+}
+
+static void fill_json_free(struct json_list *list, unsigned long group,
+		     char *bitmap, unsigned long num, unsigned long offset, int ratio)
+{
+	unsigned long i;
+	unsigned long j;
+	unsigned long long a, b;
+
+	offset /= ratio;
+	offset += group * num;
+	for (i = 0; i < num; i++)
+		if (!in_use (bitmap, i))
+		{
+			for (j = i; j < num && !in_use (bitmap, j); j++)
+				;
+			if (--j == i)
+				a = b = (i + offset) * ratio;
+			else {
+				a = (i + offset) * ratio;
+				b = (j + offset) * ratio;
+				i = j;
+			}
+			json_list_add_obj(list, json_create_range_obj(a, b));
 		}
 }
 
@@ -136,6 +186,25 @@ static void print_bg_opts(ext2_filsys fs, dgrp_t i)
 	fputc('\n', stdout);
 }
 
+static void fill_json_bg_opts(struct json_obj *obj, ext2_filsys fs, dgrp_t i)
+{
+	int bg_flags = 0;
+	struct json_list *bg_opts_list = json_list_create_in_obj(obj, "bg-opts",
+					JSON_VAL_STRING);
+
+	if (ext2fs_has_group_desc_csum(fs))
+		bg_flags = ext2fs_bg_flags(fs, i);
+	else
+		return;
+
+	if (bg_flags & EXT2_BG_INODE_UNINIT)
+		json_list_add_str(bg_opts_list, "INODE_UNINIT");
+	if (bg_flags & EXT2_BG_BLOCK_UNINIT)
+		json_list_add_str(bg_opts_list, "BLOCK_UNINIT");
+	if (bg_flags & EXT2_BG_INODE_ZEROED)
+		json_list_add_str(bg_opts_list, "ITABLE_ZEROED");
+}
+
 static void print_bg_rel_offset(ext2_filsys fs, blk64_t block, int itable,
 				blk64_t first_block, blk64_t last_block)
 {
@@ -148,6 +217,29 @@ static void print_bg_rel_offset(ext2_filsys fs, blk64_t block, int itable,
 		printf(" (bg #%u + %u)", flex_grp,
 		       (unsigned)(block-ext2fs_group_first_block2(fs,flex_grp)));
 	}
+}
+
+static struct json_obj* json_create_bg_rel_offset_obj(ext2_filsys fs,
+			blk64_t block, int itable, blk64_t first_block, blk64_t last_block)
+{
+	struct json_obj *obj = json_obj_create();
+	char buf[32];
+
+	if ((block >= first_block) && (block <= last_block)) {
+		if (itable && block == first_block)
+			return obj;
+		snprintf(buf, sizeof(buf), "%u", (unsigned)(block - first_block));
+		json_obj_add_str(obj, "offset", buf);
+	} else if (ext2fs_has_feature_flex_bg(fs->super)) {
+		dgrp_t flex_grp = ext2fs_group_of_blk2(fs, block);
+		snprintf(buf, sizeof(buf), "%u", flex_grp);
+		json_obj_add_str(obj, "bg", buf);
+		snprintf(buf, sizeof(buf), "%u",
+		         (unsigned)(block-ext2fs_group_first_block2(fs,flex_grp)));
+		json_obj_add_str(obj, "offset", buf);
+	}
+
+	return obj;
 }
 
 static void list_desc(ext2_filsys fs, int grp_only)
@@ -312,6 +404,165 @@ static void list_desc(ext2_filsys fs, int grp_only)
 					   fs->super->s_inodes_per_group,
 					   1, 1);
 			fputc('\n', stdout);
+			ino_itr += fs->super->s_inodes_per_group;
+		}
+	}
+	if (block_bitmap)
+		free(block_bitmap);
+	if (inode_bitmap)
+		free(inode_bitmap);
+}
+
+static void fill_json_desc(struct json_obj *obj, ext2_filsys fs)
+{
+	unsigned long i;
+	blk64_t	first_block, last_block;
+	blk64_t	super_blk, old_desc_blk, new_desc_blk;
+	char *block_bitmap=NULL, *inode_bitmap=NULL;
+	const char *units = "blocks";
+	int inode_blocks_per_group, old_desc_blocks, reserved_gdt;
+	int		block_nbytes, inode_nbytes;
+	int has_super;
+	blk64_t		blk_itr = EXT2FS_B2C(fs, fs->super->s_first_data_block);
+	ext2_ino_t	ino_itr = 1;
+	errcode_t	retval;
+	struct json_list *desc_list = json_list_create_in_obj(obj, "desc", JSON_VAL_OBJECT);
+	char buf[64];
+
+	if (ext2fs_has_feature_bigalloc(fs->super))
+		units = "clusters";
+
+	block_nbytes = EXT2_CLUSTERS_PER_GROUP(fs->super) / 8;
+	inode_nbytes = EXT2_INODES_PER_GROUP(fs->super) / 8;
+
+	if (fs->block_map)
+		block_bitmap = malloc(block_nbytes);
+	if (fs->inode_map)
+		inode_bitmap = malloc(inode_nbytes);
+	inode_blocks_per_group = ((fs->super->s_inodes_per_group *
+				   EXT2_INODE_SIZE(fs->super)) +
+				  EXT2_BLOCK_SIZE(fs->super) - 1) /
+				 EXT2_BLOCK_SIZE(fs->super);
+	reserved_gdt = fs->super->s_reserved_gdt_blocks;
+	first_block = fs->super->s_first_data_block;
+	if (ext2fs_has_feature_meta_bg(fs->super))
+		old_desc_blocks = fs->super->s_first_meta_bg;
+	else
+		old_desc_blocks = fs->desc_blocks;
+
+	for (i = 0; i < fs->group_desc_count; i++) {
+		struct json_obj *group_obj = json_obj_create();
+
+		json_list_add_obj(desc_list, group_obj);
+
+		first_block = ext2fs_group_first_block2(fs, i);
+		last_block = ext2fs_group_last_block2(fs, i);
+
+		ext2fs_super_and_bgd_loc2(fs, i, &super_blk,
+					  &old_desc_blk, &new_desc_blk, 0);
+
+		json_obj_add_fmt_buf_str(group_obj, "num", buf, sizeof(buf), "%lu", i);
+		json_obj_add_obj(group_obj, "blocks",
+						json_create_range_obj(first_block, last_block));
+		if (ext2fs_has_group_desc_csum(fs)) {
+			unsigned csum = ext2fs_bg_checksum(fs, i);
+			unsigned exp_csum = ext2fs_group_desc_csum(fs, i);
+
+			json_obj_add_fmt_buf_str(group_obj, "group-desc-csum",
+							buf, sizeof(buf), "0x%04x", csum);
+			if (csum != exp_csum)
+				json_obj_add_fmt_buf_str(group_obj, "group-desc-csum-exp",
+								buf, sizeof(buf), "0x%04x", exp_csum);
+		}
+
+		fill_json_bg_opts(group_obj, fs, i);
+		has_super = ((i==0) || super_blk);
+		if (has_super) {
+			json_obj_add_str(group_obj, "superblock-type",
+							i == 0 ? "Primary" : "Backup");
+			snprint_number(buf, sizeof(buf), super_blk);
+			json_obj_add_str(group_obj, "superblock-at", buf);
+		}
+		if (old_desc_blk) {
+			json_obj_add_obj(group_obj, "group-descriptors-at",
+				    json_create_range_obj(old_desc_blk,
+					    old_desc_blk + old_desc_blocks - 1));
+			if (reserved_gdt) {
+				json_obj_add_obj(group_obj, "reserved-gdt-blocks-at",
+				    json_create_range_obj(old_desc_blk + old_desc_blocks,
+					    old_desc_blk + old_desc_blocks + reserved_gdt - 1));
+			}
+		} else if (new_desc_blk) {
+			snprint_number(buf, sizeof(buf), new_desc_blk);
+			json_obj_add_str(group_obj, "group-desc-at", buf);
+			has_super++;
+		}
+
+		snprint_number(buf, sizeof(buf), ext2fs_block_bitmap_loc(fs, i));
+		json_obj_add_str(group_obj, "block-bitmap-at", buf);
+		json_obj_add_obj(group_obj, "block-bitmap-rel-offset",
+				    json_create_bg_rel_offset_obj(fs,
+					    ext2fs_block_bitmap_loc(fs, i), 0,
+					    first_block, last_block));
+		if (ext2fs_has_feature_metadata_csum(fs->super))
+			json_obj_add_fmt_buf_str(group_obj, "block-bitmap-csum", buf,
+				sizeof(buf), "0x%08x", ext2fs_block_bitmap_checksum(fs, i));
+
+		snprint_number(buf, sizeof(buf), ext2fs_inode_bitmap_loc(fs, i));
+		json_obj_add_str(group_obj, "inode-bitmap-at", buf);
+		json_obj_add_obj(group_obj, "inode-bitmap-rel-offset",
+				    json_create_bg_rel_offset_obj(fs,
+					    ext2fs_inode_bitmap_loc(fs, i), 0,
+					    first_block, last_block));
+		if (ext2fs_has_feature_metadata_csum(fs->super))
+			json_obj_add_fmt_buf_str(group_obj, "inode-bitmap-csum", buf,
+				sizeof(buf), "0x%08x", ext2fs_inode_bitmap_checksum(fs, i));
+
+		json_obj_add_obj(group_obj, "inode-table-at",
+			    json_create_range_obj(ext2fs_inode_table_loc(fs, i),
+					    ext2fs_inode_table_loc(fs, i) +
+					    inode_blocks_per_group - 1));
+
+		json_obj_add_obj(group_obj, "inode-table-rel-offset",
+			   json_create_bg_rel_offset_obj(fs,
+				    ext2fs_inode_table_loc(fs, i), 1,
+				    first_block, last_block));
+
+		json_obj_add_fmt_buf_str(group_obj, "free-blocks-count", buf,
+			sizeof(buf), "%u %s", ext2fs_bg_free_blocks_count(fs, i), units);
+		json_obj_add_fmt_buf_str(group_obj, "free-inodes-count", buf,
+			sizeof(buf), "%u", ext2fs_bg_free_inodes_count(fs, i));
+		json_obj_add_fmt_buf_str(group_obj, "used-dirs-count", buf,
+			sizeof(buf), "%u", ext2fs_bg_used_dirs_count(fs, i));
+		json_obj_add_fmt_buf_str(group_obj, "unused-inodes", buf,
+			sizeof(buf), "%u", ext2fs_bg_itable_unused(fs, i));
+		if (block_bitmap) {
+			struct json_list *free_blocks_list;
+
+			free_blocks_list = json_list_create_in_obj(group_obj,
+							"free-blocks", JSON_VAL_OBJECT);
+			retval = ext2fs_get_block_bitmap_range2(fs->block_map,
+				 blk_itr, block_nbytes << 3, block_bitmap);
+			if (!retval)
+				fill_json_free(free_blocks_list, i,
+					   block_bitmap,
+					   fs->super->s_clusters_per_group,
+					   fs->super->s_first_data_block,
+					   EXT2FS_CLUSTER_RATIO(fs));
+			blk_itr += fs->super->s_clusters_per_group;
+		}
+		if (inode_bitmap) {
+			struct json_list *free_inodes_list;
+
+			free_inodes_list = json_list_create_in_obj(group_obj,
+							"free-inodes", JSON_VAL_OBJECT);
+			retval = ext2fs_get_inode_bitmap_range2(fs->inode_map,
+				 ino_itr, inode_nbytes << 3, inode_bitmap);
+			if (!retval)
+				fill_json_free(free_inodes_list, i,
+					   inode_bitmap,
+					   fs->super->s_inodes_per_group,
+					   1, 1);
 			ino_itr += fs->super->s_inodes_per_group;
 		}
 	}
@@ -510,6 +761,8 @@ int main (int argc, char ** argv)
 	int		header_only = 0;
 	int		c;
 	int		grp_only = 0;
+	int		json = 0;
+	struct json_obj *dump_obj;
 
 #ifdef ENABLE_NLS
 	setlocale(LC_MESSAGES, "");
@@ -524,7 +777,7 @@ int main (int argc, char ** argv)
 	if (argc && *argv)
 		program_name = *argv;
 
-	while ((c = getopt(argc, argv, "bfghixVo:")) != EOF) {
+	while ((c = getopt(argc, argv, "bfghixjVo:")) != EOF) {
 		switch (c) {
 		case 'b':
 			print_badblocks++;
@@ -552,6 +805,9 @@ int main (int argc, char ** argv)
 			exit(0);
 		case 'x':
 			hex_format++;
+			break;
+		case 'j':
+			json++;
 			break;
 		default:
 			usage();
@@ -597,6 +853,8 @@ try_open_again:
 			check_plausibility(device_name, CHECK_FS_EXIST, NULL);
 		exit (1);
 	}
+	if (json)
+		dump_obj = json_obj_create();
 	fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
 	if (ext2fs_has_feature_64bit(fs->super))
 		blocks64 = 1;
@@ -607,7 +865,7 @@ try_open_again:
 			goto just_descriptors;
 		list_super (fs->super);
 		if (ext2fs_has_feature_journal_dev(fs->super)) {
-			print_journal_information(fs, dump_obj);
+			print_journal_information(fs);
 			if (json) {
 				json_obj_print_json(dump_obj, 0);
 				putchar('\n');
@@ -616,10 +874,11 @@ try_open_again:
 			ext2fs_close_free(&fs);
 			exit(0);
 		}
-		if (ext2fs_has_feature_journal(fs->super) &&
+		if (!json && ext2fs_has_feature_journal(fs->super) &&
 		    (fs->super->s_journal_inum != 0))
 			print_inline_journal_information(fs);
-		list_bad_blocks(fs, 0);
+		if (!json)
+			list_bad_blocks(fs, 0);
 		if (header_only) {
 			if (json) {
 				json_obj_print_json(dump_obj, 0);
@@ -639,7 +898,10 @@ try_bitmaps_again:
 		if (!retval && (fs->flags & EXT2_FLAG_IGNORE_CSUM_ERRORS))
 			printf("%s", _("\n*** Checksum errors detected in bitmaps!  Run e2fsck now!\n\n"));
 just_descriptors:
-		list_desc(fs, grp_only);
+		if (json)
+			fill_json_desc(dump_obj, fs);
+		else
+			list_desc(fs, grp_only);
 		if (retval) {
 			printf(_("\n%s: %s: error reading bitmaps: %s\n"),
 			       program_name, device_name,
