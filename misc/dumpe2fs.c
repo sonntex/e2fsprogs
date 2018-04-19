@@ -572,14 +572,19 @@ static void fill_json_desc(struct json_obj *obj, ext2_filsys fs)
 		free(inode_bitmap);
 }
 
-static void list_bad_blocks(ext2_filsys fs, int dump)
+static void list_bad_blocks(ext2_filsys fs, int dump, struct json_obj *obj)
 {
 	badblocks_list		bb_list = 0;
 	badblocks_iterate	bb_iter;
 	blk_t			blk;
 	errcode_t		retval;
 	const char		*header, *fmt;
+	struct json_list	*bb_json_list = NULL;
+	char	buf[32];
 
+	if (obj)
+		bb_json_list = json_list_create_in_obj(obj, "bad-blocks",
+			                                   JSON_VAL_STRING);
 	retval = ext2fs_read_bb_inode(fs, &bb_list);
 	if (retval) {
 		com_err("ext2fs_read_bb_inode", retval, 0);
@@ -598,11 +603,16 @@ static void list_bad_blocks(ext2_filsys fs, int dump)
 		fmt = ", %u";
 	}
 	while (ext2fs_badblocks_list_iterate(bb_iter, &blk)) {
+		if (bb_json_list) {
+			snprintf(buf, sizeof(buf), "%u", blk);
+			json_list_add_str(bb_json_list, buf);
+			continue;
+		}
 		printf(header ? header : fmt, blk);
 		header = 0;
 	}
 	ext2fs_badblocks_list_iterate_end(bb_iter);
-	if (!dump)
+	if (!dump && !bb_json_list)
 		fputc('\n', stdout);
 	ext2fs_badblocks_list_free(bb_list);
 }
@@ -865,7 +875,7 @@ try_open_again:
 	if (ext2fs_has_feature_64bit(fs->super))
 		blocks64 = 1;
 	if (print_badblocks) {
-		list_bad_blocks(fs, 1);
+		list_bad_blocks(fs, 1, dump_obj);
 	} else {
 		if (grp_only)
 			goto just_descriptors;
@@ -886,8 +896,7 @@ try_open_again:
 		if (ext2fs_has_feature_journal(fs->super) &&
 		    (fs->super->s_journal_inum != 0))
 			print_inline_journal_information(fs, dump_obj);
-		if (!json)
-			list_bad_blocks(fs, 0);
+		list_bad_blocks(fs, 0, dump_obj);
 		if (header_only) {
 			if (json) {
 				json_obj_print_json(dump_obj, 0);
