@@ -37,6 +37,15 @@ static void print_user (unsigned short uid, FILE *f)
 		fprintf(f, "(user %s)\n", pw->pw_name);
 }
 
+static void fill_json_user(struct json_obj *obj, unsigned short uid)
+{
+	struct passwd *pw = getpwuid(uid);
+
+	json_obj_add_fmt_str(obj, "uid", 32, "%u", uid);
+	if (pw)
+		json_obj_add_str(obj, "user", pw->pw_name);
+}
+
 static void print_group (unsigned short gid, FILE *f)
 {
 	struct group *gr;
@@ -47,6 +56,15 @@ static void print_group (unsigned short gid, FILE *f)
 		fprintf(f, "(group unknown)\n");
 	else
 		fprintf(f, "(group %s)\n", gr->gr_name);
+}
+
+static void fill_json_group(struct json_obj *obj, unsigned short gid)
+{
+	struct group *gr = getgrgid(gid);
+
+	json_obj_add_fmt_str(obj, "gid", 32, "%u", gid);
+	if (gr)
+		json_obj_add_str(obj, "group", gr->gr_name);
 }
 
 #define MONTH_INT (86400 * 30)
@@ -117,6 +135,24 @@ static void print_features(struct ext2_super_block * s, FILE *f)
 #endif
 }
 
+static void fill_json_features(struct json_obj *obj,
+							   struct ext2_super_block *s)
+{
+#ifdef EXT2_DYNAMIC_REV
+	int	i, j;
+	__u32	*mask = &s->s_feature_compat, m;
+	struct json_list *list = json_list_create_in_obj(obj,
+								"filesystem-features", JSON_VAL_STRING);
+
+	for (i=0; i <3; i++,mask++) {
+		for (j=0,m=1; j < 32; j++, m<<=1) {
+			if (*mask & m)
+				json_list_add_str(list, e2p_feature2string(i, m));
+		}
+	}
+#endif
+}
+
 static void print_mntopts(struct ext2_super_block * s, FILE *f)
 {
 #ifdef EXT2_DYNAMIC_REV
@@ -139,6 +175,26 @@ static void print_mntopts(struct ext2_super_block * s, FILE *f)
 	if (printed == 0)
 		fprintf(f, " (none)");
 	fprintf(f, "\n");
+#endif
+}
+
+static void fill_json_mntopts(struct json_obj *obj,
+							  struct ext2_super_block *s)
+{
+#ifdef EXT2_DYNAMIC_REV
+	int	i;
+	__u32	mask = s->s_default_mount_opts, m;
+	struct json_list *list = json_list_create_in_obj(obj,
+								"default-mount-options", JSON_VAL_STRING);
+
+	if (mask & EXT3_DEFM_JMODE)
+		json_list_add_str(list, e2p_mntopt2string(mask & EXT3_DEFM_JMODE));
+	for (i=0,m=1; i < 32; i++, m<<=1) {
+		if (m & EXT3_DEFM_JMODE)
+			continue;
+		if (mask & m)
+			json_list_add_str(list, e2p_mntopt2string(m));
+	}
 #endif
 }
 
@@ -167,6 +223,25 @@ static void print_super_flags(struct ext2_super_block * s, FILE *f)
 	else
 		fputs("(none)\n", f);
 }
+
+static void fill_json_super_flags(struct json_obj *obj,
+								  struct ext2_super_block *s)
+{
+	int	flags_found = 0;
+	struct json_list *list = json_list_create_in_obj(obj,
+								"filesystem-flags", JSON_VAL_STRING);
+
+	if (s->s_flags == 0)
+		return;
+
+	if (s->s_flags & EXT2_FLAGS_SIGNED_HASH)
+		json_list_add_str(list, "signed_directory_hash");
+	if (s->s_flags & EXT2_FLAGS_UNSIGNED_HASH)
+		json_list_add_str(list, "unsigned_directory_hash");
+	if (s->s_flags & EXT2_FLAGS_TEST_FILESYS)
+		json_list_add_str(list, "test_filesystem");
+}
+
 
 static __u64 e2p_blocks_count(struct ext2_super_block *super)
 {
@@ -211,6 +286,12 @@ static const char *quota_prefix[MAXQUOTAS] = {
 	[USRQUOTA] = "User quota inode:",
 	[GRPQUOTA] = "Group quota inode:",
 	[PRJQUOTA] = "Project quota inode:",
+};
+
+static const char *json_quota_prefix[MAXQUOTAS] = {
+	[USRQUOTA] = "user-quota-inode",
+	[GRPQUOTA] = "group-quota-inode",
+	[PRJQUOTA] = "project-quota-inode",
 };
 
 /**
@@ -477,3 +558,284 @@ void list_super (struct ext2_super_block * s)
 	list_super2(s, stdout);
 }
 
+static void fill_json_time(struct json_obj *obj, const char *key, char *buf,
+						   time_t tm)
+{
+	char *str;
+
+	if (tm && (ctime_r(&tm, buf))) {
+		if (str = strchr(buf, '\n'))
+			*str = '\0';
+		json_obj_add_str(obj, key, buf);
+	}
+}
+
+void fill_json_super(struct json_obj *obj, struct ext2_super_block * sb)
+{
+	int inode_blocks_per_group;
+	char buf[80], *str;
+	time_t	tm;
+	enum quota_type qtype;
+	struct json_obj *super_obj = json_obj_create_in_obj(obj, "super");
+
+	inode_blocks_per_group = (((sb->s_inodes_per_group *
+				    EXT2_INODE_SIZE(sb)) +
+				   EXT2_BLOCK_SIZE(sb) - 1) /
+				  EXT2_BLOCK_SIZE(sb));
+	if (sb->s_volume_name[0]) {
+		memset(buf, 0, sizeof(buf));
+		strncpy(buf, sb->s_volume_name, sizeof(sb->s_volume_name));
+	} else
+		strcpy(buf, "<none>");
+	json_obj_add_str(super_obj, "fs-volume-name", buf);
+	if (sb->s_last_mounted[0]) {
+		memset(buf, 0, sizeof(buf));
+		strncpy(buf, sb->s_last_mounted, sizeof(sb->s_last_mounted));
+	} else
+		strcpy(buf, "<not available>");
+	json_obj_add_str(super_obj, "last-mounted-on", buf);
+	json_obj_add_str(super_obj, "fs-uuid", e2p_uuid2str(sb->s_uuid));
+	json_obj_add_fmt_buf_str(super_obj, "fs-magic-number", buf, sizeof(buf),
+		"0x%04X", sb->s_magic);
+	json_obj_add_fmt_buf_str(super_obj, "fs-revision-level", buf, sizeof(buf),
+		"%d", sb->s_rev_level);
+	fill_json_features(super_obj, sb);
+	fill_json_super_flags(super_obj, sb);
+	fill_json_mntopts(super_obj, sb);
+	if (sb->s_mount_opts[0])
+		json_obj_add_str(super_obj, "mount-options", sb->s_mount_opts);
+	snprint_fs_state(buf, sizeof(buf), sb->s_state);
+	json_obj_add_str(super_obj, "fs-state", buf);
+	snprint_fs_errors(buf, sizeof(buf), sb->s_errors);
+	json_obj_add_str(super_obj, "errors-behaviour", buf);
+	str = e2p_os2string(sb->s_creator_os);
+	json_obj_add_str(super_obj, "fs-os-type", str);
+	free(str);
+	json_obj_add_fmt_buf_str(super_obj, "inode-count", buf, sizeof(buf), "%u",
+		sb->s_inodes_count);
+	json_obj_add_fmt_buf_str(super_obj, "block-count", buf, sizeof(buf),
+		"%llu", e2p_blocks_count(sb));
+	json_obj_add_fmt_buf_str(super_obj, "reserved-block-count", buf,
+		sizeof(buf), "%llu", e2p_r_blocks_count(sb));
+	if (sb->s_overhead_blocks)
+		json_obj_add_fmt_buf_str(super_obj, "overhead-blocks", buf,
+			sizeof(buf), "%u", sb->s_overhead_blocks);
+	json_obj_add_fmt_buf_str(super_obj, "free-blocks", buf, sizeof(buf),
+		"%llu", e2p_free_blocks_count(sb));
+	json_obj_add_fmt_buf_str(super_obj, "free-inodes", buf, sizeof(buf), "%u",
+		sb->s_free_inodes_count);
+	json_obj_add_fmt_buf_str(super_obj, "first-block", buf, sizeof(buf), "%u",
+		sb->s_first_data_block);
+	json_obj_add_fmt_buf_str(super_obj, "block-size", buf, sizeof(buf), "%u",
+		EXT2_BLOCK_SIZE(sb));
+	if (ext2fs_has_feature_bigalloc(sb))
+		json_obj_add_fmt_buf_str(super_obj, "cluster-size", buf, sizeof(buf),
+			"%u", EXT2_CLUSTER_SIZE(sb));
+	else
+		json_obj_add_fmt_buf_str(super_obj, "fragment-size", buf, sizeof(buf),
+			"%u", EXT2_CLUSTER_SIZE(sb));
+
+	if (ext2fs_has_feature_64bit(sb))
+		json_obj_add_fmt_buf_str(super_obj, "group-descriptor-size", buf,
+			sizeof(buf), "%u", sb->s_desc_size);
+	if (sb->s_reserved_gdt_blocks)
+		json_obj_add_fmt_buf_str(super_obj, "reserved-gdt-blocks", buf,
+			sizeof(buf), "%u", sb->s_reserved_gdt_blocks);
+	json_obj_add_fmt_buf_str(super_obj, "blocks-per-group", buf, sizeof(buf),
+		"%u", sb->s_blocks_per_group);
+	if (ext2fs_has_feature_bigalloc(sb))
+		json_obj_add_fmt_buf_str(super_obj, "clusters-per-group", buf,
+			sizeof(buf), "%u", sb->s_clusters_per_group);
+	else
+		json_obj_add_fmt_buf_str(super_obj, "fragments-per-group", buf,
+			sizeof(buf), "%u", sb->s_clusters_per_group);
+	json_obj_add_fmt_buf_str(super_obj, "inodes-per-group", buf, sizeof(buf),
+		"%u", sb->s_inodes_per_group);
+	json_obj_add_fmt_buf_str(super_obj, "inode-blocks-per-group", buf,
+		sizeof(buf), "%u", inode_blocks_per_group);
+	if (sb->s_raid_stride)
+		json_obj_add_fmt_buf_str(super_obj, "raid-stride", buf, sizeof(buf),
+			"%u", sb->s_raid_stride);
+	if (sb->s_raid_stripe_width)
+		json_obj_add_fmt_buf_str(super_obj, "raid-stripe-width", buf,
+			sizeof(buf), "%u", sb->s_raid_stripe_width);
+	if (sb->s_first_meta_bg)
+		json_obj_add_fmt_buf_str(super_obj, "first-meta-block-group", buf,
+			sizeof(buf), "%u", sb->s_first_meta_bg);
+	if (sb->s_log_groups_per_flex)
+		json_obj_add_fmt_buf_str(super_obj, "flex-block-group-size", buf,
+			sizeof(buf), "%u", 1 << sb->s_log_groups_per_flex);
+
+	json_obj_add_fmt_buf_str(super_obj, "inodes-per-group", buf, sizeof(buf),
+		"%u", sb->s_inodes_per_group);
+	json_obj_add_fmt_buf_str(super_obj, "inode-blocks-per-group", buf,
+		sizeof(buf), "%u", inode_blocks_per_group);
+	if (sb->s_raid_stride)
+		json_obj_add_fmt_buf_str(super_obj, "raid-stride", buf, sizeof(buf),
+			"%u", sb->s_raid_stride);
+	if (sb->s_raid_stripe_width)
+		json_obj_add_fmt_buf_str(super_obj, "raid-stripe-width", buf,
+			sizeof(buf), "%u", sb->s_raid_stripe_width);
+	if (sb->s_first_meta_bg)
+		json_obj_add_fmt_buf_str(super_obj, "first-meta-block-group", buf,
+			sizeof(buf), "%u", sb->s_first_meta_bg);
+	if (sb->s_log_groups_per_flex)
+		json_obj_add_fmt_buf_str(super_obj, "flex-block-group-size", buf,
+			sizeof(buf), "%u", 1 << sb->s_log_groups_per_flex);
+	fill_json_time(super_obj, "filesystem-created", buf, sb->s_mkfs_time);
+	fill_json_time(super_obj, "last-mount-time", buf, sb->s_mtime);
+	fill_json_time(super_obj, "last-write-time", buf, sb->s_wtime);
+	json_obj_add_fmt_buf_str(super_obj, "mount-count", buf, sizeof(buf),
+		"%u", sb->s_mnt_count);
+	json_obj_add_fmt_buf_str(super_obj, "maximum-mount-count", buf,
+		sizeof(buf), "%d", sb->s_max_mnt_count);
+	fill_json_time(super_obj, "last-checked", buf, sb->s_lastcheck);
+	json_obj_add_fmt_buf_str(super_obj, "check-interval", buf, sizeof(buf),
+		"%u", sb->s_checkinterval);
+	json_obj_add_str(super_obj, "check-interval-str",
+		interval_string(sb->s_checkinterval));
+	if (sb->s_checkinterval)
+	{
+		time_t next = sb->s_lastcheck + sb->s_checkinterval;
+
+		fill_json_time(super_obj, "next-check-after", buf,
+			sb->s_lastcheck + sb->s_checkinterval);
+	}
+#define POW2(x) ((__u64) 1 << (x))
+	if (sb->s_kbytes_written) {
+		if (sb->s_kbytes_written < POW2(13))
+			json_obj_add_fmt_buf_str(super_obj, "lifetime-writes", buf,
+				sizeof(buf), "%llu kB", sb->s_kbytes_written);
+		else if (sb->s_kbytes_written < POW2(23))
+			json_obj_add_fmt_buf_str(super_obj, "lifetime-writes", buf,
+				sizeof(buf), "%llu MB",
+				(sb->s_kbytes_written + POW2(9)) >> 10);
+		else if (sb->s_kbytes_written < POW2(33))
+			json_obj_add_fmt_buf_str(super_obj, "lifetime-writes", buf,
+				sizeof(buf), "%llu GB",
+				(sb->s_kbytes_written + POW2(19)) >> 20);
+		else if (sb->s_kbytes_written < POW2(43))
+			json_obj_add_fmt_buf_str(super_obj, "lifetime-writes", buf,
+				sizeof(buf), "%llu TB",
+				(sb->s_kbytes_written + POW2(29)) >> 30);
+		else
+			json_obj_add_fmt_buf_str(super_obj, "lifetime-writes", buf,
+				sizeof(buf), "%llu PB",
+				(sb->s_kbytes_written + POW2(39)) >> 40);
+	}
+	fill_json_user(super_obj, sb->s_def_resuid);
+	fill_json_group(super_obj, sb->s_def_resgid);
+	if (sb->s_rev_level >= EXT2_DYNAMIC_REV) {
+		json_obj_add_fmt_buf_str(super_obj, "first-inode", buf, sizeof(buf),
+				"%d", sb->s_first_ino);
+		json_obj_add_fmt_buf_str(super_obj, "inode-size", buf, sizeof(buf),
+				"%d", sb->s_inode_size);
+		if (sb->s_min_extra_isize)
+			json_obj_add_fmt_buf_str(super_obj, "required-extra-isize", buf,
+				sizeof(buf), "%d", sb->s_min_extra_isize);
+		if (sb->s_want_extra_isize)
+			json_obj_add_fmt_buf_str(super_obj, "desired-extra-isize", buf,
+				sizeof(buf), "%d", sb->s_want_extra_isize);
+	}
+	if (!e2p_is_null_uuid(sb->s_journal_uuid))
+		json_obj_add_str(super_obj, "journal-uuid",
+			e2p_uuid2str(sb->s_journal_uuid));
+	if (sb->s_journal_inum)
+		json_obj_add_fmt_buf_str(super_obj, "journal-inode", buf,
+			sizeof(buf), "%u", sb->s_journal_inum);
+	if (sb->s_journal_dev)
+		json_obj_add_fmt_buf_str(super_obj, "journal-device", buf,
+			sizeof(buf), "0x%04x", sb->s_journal_dev);
+	if (sb->s_last_orphan)
+		json_obj_add_fmt_buf_str(super_obj, "first-orphan-inode", buf,
+			sizeof(buf), "%u", sb->s_last_orphan);
+	if (ext2fs_has_feature_dir_index(sb) ||
+	    sb->s_def_hash_version)
+		json_obj_add_str(super_obj, "default-directory-hash",
+			e2p_hash2string(sb->s_def_hash_version));
+	if (!e2p_is_null_uuid(sb->s_hash_seed))
+		json_obj_add_str(super_obj, "directory-hash-seed",
+			e2p_uuid2str(sb->s_hash_seed));
+	if (sb->s_jnl_backup_type) {
+		switch (sb->s_jnl_backup_type) {
+		case 1:
+			json_obj_add_str(super_obj, "journal-backup", "inode blocks");
+			break;
+		default:
+			json_obj_add_fmt_buf_str(super_obj, "journal-backup", buf,
+				sizeof(buf), "type %u", sb->s_jnl_backup_type);
+		}
+	}
+	if (sb->s_backup_bgs[0])
+		json_obj_add_fmt_buf_str(super_obj, "backup-block-group-0", buf,
+			sizeof(buf), "%u", sb->s_backup_bgs[0]);
+	if (sb->s_backup_bgs[1])
+		json_obj_add_fmt_buf_str(super_obj, "backup-block-group-1", buf,
+			sizeof(buf), "%u", sb->s_backup_bgs[1]);
+	if (sb->s_snapshot_inum) {
+		json_obj_add_fmt_buf_str(super_obj, "snapshot-inode", buf, sizeof(buf),
+			"%u", sb->s_snapshot_inum);
+		json_obj_add_fmt_buf_str(super_obj, "snapshot-id", buf, sizeof(buf),
+			"%u", sb->s_snapshot_id);
+		json_obj_add_fmt_buf_str(super_obj, "snapshot-reserved-blocks", buf,
+			sizeof(buf), "%llu", sb->s_snapshot_r_blocks_count);
+	}
+	if (sb->s_snapshot_list)
+		json_obj_add_fmt_buf_str(super_obj, "snapshot-list-head", buf,
+			sizeof(buf), "%u", sb->s_snapshot_list);
+	if (sb->s_error_count)
+		json_obj_add_fmt_buf_str(super_obj, "fs-error-count", buf, sizeof(buf),
+			"%u", sb->s_error_count);
+	if (sb->s_first_error_time) {
+		fill_json_time(super_obj, "first-error-time", buf,
+			sb->s_first_error_time);
+		memset(buf, 0, sizeof(buf));
+		strncpy(buf, (char *)sb->s_first_error_func,
+			sizeof(sb->s_first_error_func));
+		json_obj_add_str(super_obj, "first-error-function", buf);
+		json_obj_add_fmt_buf_str(super_obj, "first-error-line-num", buf,
+			sizeof(buf), "%u", sb->s_first_error_line);
+		json_obj_add_fmt_buf_str(super_obj, "first-error-inode-num", buf,
+			sizeof(buf), "%u", sb->s_first_error_ino);
+		json_obj_add_fmt_buf_str(super_obj, "first-error-block-num", buf,
+			sizeof(buf), "%llu", sb->s_first_error_block);
+	}
+	if (sb->s_last_error_time) {
+		fill_json_time(super_obj, "last-error-time", buf,
+			sb->s_last_error_time);
+		memset(buf, 0, sizeof(buf));
+		strncpy(buf, (char *)sb->s_last_error_func,
+			sizeof(sb->s_last_error_func));
+		json_obj_add_str(super_obj, "last-error-function", buf);
+		json_obj_add_fmt_buf_str(super_obj, "last-error-line-num", buf,
+			sizeof(buf), "%u", sb->s_last_error_line);
+		json_obj_add_fmt_buf_str(super_obj, "last-error-inode-num", buf,
+			sizeof(buf), "%u", sb->s_last_error_ino);
+		json_obj_add_fmt_buf_str(super_obj, "last-error-block-num", buf,
+			sizeof(buf), "%llu", sb->s_last_error_block);
+	}
+	if (ext2fs_has_feature_mmp(sb)) {
+		json_obj_add_fmt_buf_str(super_obj, "mmp-block-number", buf,
+			sizeof(buf), "%llu", (long long)sb->s_mmp_block);
+		json_obj_add_fmt_buf_str(super_obj, "mmp-update-interval", buf,
+			sizeof(buf), "%u", sb->s_mmp_update_interval);
+	}
+	for (qtype = 0; qtype < MAXQUOTAS; qtype++) {
+		if (*quota_sb_inump(sb, qtype) != 0)
+			json_obj_add_fmt_buf_str(super_obj, json_quota_prefix[qtype], buf,
+				sizeof(buf), "%u", *quota_sb_inump(sb, qtype));
+	}
+	if (ext2fs_has_feature_metadata_csum(sb)) {
+		json_obj_add_str(super_obj, "checksum-type",
+			checksum_type(sb->s_checksum_type));
+		json_obj_add_fmt_buf_str(super_obj, "checksum", buf, sizeof(buf),
+			"0x%08x", sb->s_checksum);
+	}
+	if (!e2p_is_null_uuid(sb->s_encrypt_pw_salt))
+		json_obj_add_str(super_obj, "encryption-pw-salt",
+			e2p_uuid2str(sb->s_encrypt_pw_salt));
+
+	if (ext2fs_has_feature_csum_seed(sb))
+		json_obj_add_fmt_buf_str(super_obj, "checksum-seed", buf, sizeof(buf),
+			"0x%08x", sb->s_checksum_seed);
+}

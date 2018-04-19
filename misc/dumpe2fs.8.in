@@ -72,6 +72,9 @@ as the pathname to the image file.
 .B \-x
 print the detailed group information block numbers in hexadecimal format
 .TP
+.B \-j
+use JSON ouput format
+.TP
 .B \-V
 print the version number of
 .B dumpe2fs
