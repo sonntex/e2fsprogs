@@ -607,7 +607,7 @@ static void list_bad_blocks(ext2_filsys fs, int dump)
 	ext2fs_badblocks_list_free(bb_list);
 }
 
-static void print_inline_journal_information(ext2_filsys fs)
+static void print_inline_journal_information(ext2_filsys fs, struct json_obj *obj)
 {
 	journal_superblock_t	*jsb;
 	struct ext2_inode	inode;
@@ -643,10 +643,13 @@ static void print_inline_journal_information(ext2_filsys fs)
 			_("Journal superblock magic number invalid!\n"));
 		exit(1);
 	}
-	e2p_list_journal_super(stdout, buf, fs->blocksize, 0);
+	if (obj)
+		e2p_fill_json_journal_super(obj, buf, fs->blocksize, 0);
+	else
+		e2p_list_journal_super(stdout, buf, fs->blocksize, 0);
 }
 
-static void print_journal_information(ext2_filsys fs)
+static void print_journal_information(ext2_filsys fs, struct json_obj *obj)
 {
 	errcode_t	retval;
 	char		buf[1024];
@@ -668,7 +671,10 @@ static void print_journal_information(ext2_filsys fs)
 			_("Couldn't find journal superblock magic numbers"));
 		exit(1);
 	}
-	e2p_list_journal_super(stdout, buf, fs->blocksize, 0);
+	if (obj)
+		e2p_fill_json_journal_super(obj, buf, fs->blocksize, 0);
+	else
+		e2p_list_journal_super(stdout, buf, fs->blocksize, 0);
 }
 
 static void parse_extended_opts(const char *opts, blk64_t *superblock,
@@ -762,7 +768,7 @@ int main (int argc, char ** argv)
 	int		c;
 	int		grp_only = 0;
 	int		json = 0;
-	struct json_obj *dump_obj;
+	struct json_obj *dump_obj = NULL;
 
 #ifdef ENABLE_NLS
 	setlocale(LC_MESSAGES, "");
@@ -868,7 +874,7 @@ try_open_again:
 		else
 			list_super (fs->super);
 		if (ext2fs_has_feature_journal_dev(fs->super)) {
-			print_journal_information(fs);
+			print_journal_information(fs, dump_obj);
 			if (json) {
 				json_obj_print_json(dump_obj, 0);
 				putchar('\n');
@@ -877,9 +883,9 @@ try_open_again:
 			ext2fs_close_free(&fs);
 			exit(0);
 		}
-		if (!json && ext2fs_has_feature_journal(fs->super) &&
+		if (ext2fs_has_feature_journal(fs->super) &&
 		    (fs->super->s_journal_inum != 0))
-			print_inline_journal_information(fs);
+			print_inline_journal_information(fs, dump_obj);
 		if (!json)
 			list_bad_blocks(fs, 0);
 		if (header_only) {
